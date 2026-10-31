@@ -1,7 +1,8 @@
 [Unit]
 Description=Voice Assistant · wake word + ASR loop (microphone)
-After=dsh-voice-bridge.service
-Requires=dsh-voice-bridge.service
+# 不要 Requires/After 桥单元：桥可能由 DSH 插件托管（此时无 systemd 单元），
+# 硬依赖会造成「桥启动失败 -> 本单元被反复重启」的死循环
+After=network.target
 
 [Service]
 Type=simple

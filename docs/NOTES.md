@@ -203,3 +203,20 @@ ast 层检查不到。教训：校验用 `python -m py_compile`，不要只做 a
 - 事故：Chrome 窗口被关闭 → CDP 退出（exit 0）→ 注入不可用；重启 `dsh-voice-chrome.service` 并用新 token 重新认证后恢复
 - `scripts/healthcheck.sh` 升级为自动识别托管模式（systemd / plugin），当前 8/8 通过
 
+
+## 语音输入失败排障（2026-10-31 16:47）
+现象：对着麦克风说话无任何反应。
+根因链：
+1. `dsh-voice-loop.service` 里写了 `Requires=dsh-voice-bridge.service`
+2. 但 bridge 已改由 DSH 插件托管，systemd 里没有可用的 bridge 单元
+3. 启动 loop 时连带拉起 bridge 单元 → 端口 8766 被插件占用 → 单元 exit 1 → auto-restart 抖动
+4. Requires 依赖失败 → 连带 loop 被反复停止/重启（每约 3 秒一次）
+5. loop 每次只活 1–3 秒，模型刚加载完就被杀，永远处理不到音频
+
+修复：
+- loop 单元去掉 `Requires=/After=` 桥依赖（改为运行时通过 HTTP 判断）
+- 显式 `disable --now` 掉 tts/autoread/bridge 三个单元，避免与插件抢端口
+- 验证：20 秒内重启次数 = 1（即人工那次），loop 稳定 active，arecord 子进程存活
+
+教训：**托管模式切换后，systemd 单元之间的硬依赖必须同步清理**，否则会形成静默的抖动死循环——日志里只有 "Stopping/Stopped"，看不到任何 Python 报错，极易误判为"程序崩了"。
+
