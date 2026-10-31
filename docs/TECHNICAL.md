@@ -413,3 +413,51 @@ voice-assistant/
 3. 认证判断误报（body 残留提示文本）→ 改为"找不到输入框才判未认证"
 4. 清空输入框用 `innerText=""` 对 React 无效 → 新增 `clear.mjs` 走真实键盘事件
 5. Chrome 只在后台任务里 → 补 `dsh-voice-chrome.service`
+
+---
+
+## 15. DSH 插件形态（v1.2）
+
+同一套能力除了以 systemd 常驻，也已打包为**标准 DSH 插件**，可被宿主直接加载：
+
+```
+plugin/
+├── package.json          name=dsh-voice-assistant, main=lib/index.js, dsh.bundle.patch=cordis.patch.yml
+├── cordis.patch.yml      insert 一行插件配置（root/services/引擎/音色/唤醒词）
+└── lib/index.js          cordis 插件：apply(ctx, config) 里 spawn 子进程，ctx.effect 负责清理
+```
+
+### 为什么不会被兼容性守卫拦
+
+守卫只检查两处：`engines.dsh` 与对 `@deepseek-ai/*` 的 peerDependencies。
+本插件**两者都不声明**——它只依赖 node 标准库，子服务是独立的 Python 进程。
+
+### 安装
+
+```bash
+dsh plugin --profile web add link:$(pwd)/plugin
+# 重启宿主后生效（bundle 列表变更需要重启）
+```
+
+### 端口守卫（重要设计）
+
+插件启动前先探测 8765/8766：
+
+- **端口空闲** → 插件接管，spawn tts / autoread / bridge
+- **端口被占** → 判定为"外部托管"，插件整体保持被动，只记一条日志
+
+这条规则避免了两类事故：
+1. systemd 与插件同时启动 → 端口冲突
+2. autoread 没有端口，被重复拉起 → **重复朗读**（实测踩到过）
+
+### 二选一迁移
+
+| 目标 | 操作 |
+|---|---|
+| 用插件托管 | `systemctl --user disable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service` 后重启宿主 |
+| 退回 systemd | `dsh plugin --profile web remove dsh-voice-assistant` 后 `systemctl --user enable --now ...` |
+
+### 子进程日志
+
+`~/.dsh/logs/voice-assistant/{tts,autoread,bridge}.log`
+

@@ -100,3 +100,14 @@ systemctl --user edit dsh-voice-loop.service  # Environment=VL_WAKE=小艺,贾�
 ## License
 
 私有项目，未授权发布。
+
+## DSH 插件形态
+
+本项目同时提供 DSH 插件包（`plugin/`），可让宿主直接托管三个子服务：
+
+```bash
+dsh plugin --profile web add link:$(pwd)/plugin    # 安装
+# 重启宿主后生效；插件会先探测端口，被 systemd 占用时自动保持被动
+```
+
+详见 [技术文档 15 章](docs/TECHNICAL.md)。
