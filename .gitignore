@@ -1,0 +1,5 @@
+.venv/
+kokoro/
+__pycache__/
+*.pyc
+.env

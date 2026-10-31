@@ -1,0 +1,15 @@
+[Unit]
+Description=Voice Assistant · CDP injection bridge (:8766)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/project/test/voice-assistant
+ExecStart=%h/project/test/voice-assistant/.venv/bin/python %h/project/test/voice-assistant/src/voice_bridge.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/tmp/dsh-voice-bridge.log
+StandardError=append:/tmp/dsh-voice-bridge.log
+
+[Install]
+WantedBy=default.target

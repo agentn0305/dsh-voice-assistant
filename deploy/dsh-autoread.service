@@ -1,0 +1,16 @@
+[Unit]
+Description=Voice Assistant · auto-read DSH replies
+After=dsh-tts.service
+Requires=dsh-tts.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/project/test/voice-assistant
+ExecStart=%h/project/test/voice-assistant/.venv/bin/python %h/project/test/voice-assistant/src/auto_read.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/dsh-autoread.log
+StandardError=append:/tmp/dsh-autoread.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Voice Assistant · wake word + ASR loop (microphone)
+After=dsh-voice-bridge.service
+Requires=dsh-voice-bridge.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/project/test/voice-assistant
+Environment=VL_CMD_URL=http://127.0.0.1:8766/inject
+Environment=VL_WAKE=小艺,小艺小艺,你好小艺,小艺助手
+ExecStart=%h/project/test/voice-assistant/.venv/bin/python %h/project/test/voice-assistant/src/voice_loop.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/dsh-voice-loop.log
+StandardError=append:/tmp/dsh-voice-loop.log
+
+[Install]
+WantedBy=default.target

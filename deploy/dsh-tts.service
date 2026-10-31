@@ -1,0 +1,20 @@
+[Unit]
+Description=Voice Assistant · TTS server (edge-tts Xiaoxiao, kokoro fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/project/test/voice-assistant
+Environment=TTS_ENGINE=edge
+Environment=TTS_VOICE=zh-CN-XiaoxiaoNeural
+Environment=TTS_RATE=+8%
+Environment=TTS_KOKORO_VOICE=zf_xiaoyi
+ExecStart=%h/project/test/voice-assistant/.venv/bin/python %h/project/test/voice-assistant/src/tts_server.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/tmp/dsh-tts.log
+StandardError=append:/tmp/dsh-tts.log
+
+[Install]
+WantedBy=default.target

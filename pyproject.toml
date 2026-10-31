@@ -1,0 +1,16 @@
+[project]
+name = "dsh-voice-assistant"
+version = "1.0.0"
+description = "Voice I/O layer for DeepSeek Harness: local ASR, wake word, TTS, CDP injection"
+requires-python = ">=3.11"
+
+dependencies = [
+  "edge-tts>=7.3",
+  "sherpa-onnx>=2.0",
+  "kokoro-onnx>=0.6",
+  "misaki[zh]>=0.9",
+  "numpy>=2.0",
+]
+
+[tool.setuptools]
+packages = []
