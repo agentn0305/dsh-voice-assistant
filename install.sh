@@ -39,7 +39,18 @@ for f in kokoro-v1.0.onnx voices-v1.0.bin; do
 done
 cd "$ROOT"
 
-say "5/6 安装 systemd 单元"
+say "5/6 修正 dsh-web 服务的 node 路径"
+UNIT="$HOME/.config/systemd/user/dsh-web.service"
+if [ -f "$UNIT" ] && grep -q '^ExecStart=/usr/bin/node' "$UNIT"; then
+  sed -i 's|^ExecStart=/usr/bin/node|ExecStart=/usr/local/bin/node|' "$UNIT"
+  systemctl --user daemon-reload
+  echo "  ok: dsh-web.service ExecStart -> /usr/local/bin/node"
+  echo "      需 systemctl --user restart dsh-web.service 生效（会中断当前会话）"
+else
+  echo "  - 无需修改"
+fi
+
+say "5b/6 安装 systemd 单元"
 install -m644 deploy/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service

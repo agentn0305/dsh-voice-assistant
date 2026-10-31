@@ -193,3 +193,13 @@
 `ast.parse()` 通过 ≠ 能运行：`global _engine` 写在函数中途（前面已读过该名）属于**编译期** SyntaxError，
 ast 层检查不到。教训：校验用 `python -m py_compile`，不要只做 ast.parse。
 
+
+## 切换为插件托管（2026-10-31 16:36 重启）
+- 用 systemd 瞬时单元 `dsh-restart-once` 执行重启（脱离我的会话，避免中断导致重启半途而废）
+- 结果：**插件在第 2 秒接管 TTS**，systemd 版三个单元已 disable，避免抢端口
+- 插件子进程日志：`~/.dsh/logs/voice-assistant/{tts,autoread,bridge}.log`
+- 事故：`dsh-web.service` 的 ExecStart 写死 `/usr/bin/node`（发行版构建，ts=false）→ DSH run_code 再次全挂
+  修复：改写为 `/usr/local/bin/node`；已把该检查固化进 `install.sh` 第 5 步
+- 事故：Chrome 窗口被关闭 → CDP 退出（exit 0）→ 注入不可用；重启 `dsh-voice-chrome.service` 并用新 token 重新认证后恢复
+- `scripts/healthcheck.sh` 升级为自动识别托管模式（systemd / plugin），当前 8/8 通过
+
