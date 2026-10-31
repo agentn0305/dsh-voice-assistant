@@ -1,0 +1,13 @@
+[Unit]
+Description=Voice Assistant · auto-authenticate CDP Chrome with fresh DSH token
+After=dsh-web.service dsh-voice-chrome.service
+Wants=dsh-web.service dsh-voice-chrome.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/project/test/voice-assistant/scripts/auth-chrome.sh
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

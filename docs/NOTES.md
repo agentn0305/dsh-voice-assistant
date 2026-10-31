@@ -220,3 +220,22 @@ ast 层检查不到。教训：校验用 `python -m py_compile`，不要只做 a
 
 教训：**托管模式切换后，systemd 单元之间的硬依赖必须同步清理**，否则会形成静默的抖动死循环——日志里只有 "Stopping/Stopped"，看不到任何 Python 报错，极易误判为"程序崩了"。
 
+
+## 重启前自愈加固（2026-10-31 16:49）
+- 问题：每次 DSH 宿主重启，token 变化 -> CDP 专用 Chrome 变未认证 -> 注入失效（已踩两次）
+- 方案：新增 `dsh-voice-auth.service`（oneshot）
+  - 从 `journalctl -u dsh-web.service` 抓最新 token URL
+  - 等待 Chrome/CDP 就绪（最多 40 次 × 3 s）
+  - 调用 `src/cdp/auth.mjs` 导航并校验页面已认证
+  - 幂等：已认证时也直接通过（实测 1 次即成功）
+- 同时 `enable` 了 `dsh-voice-loop.service`（此前是 disabled，重启后语音不会自己回来）
+
+### 开机自启清单（已全部 enabled）
+| 单元 | 作用 |
+|---|---|
+| dsh-web.service | DSH 宿主（node 已修为 /usr/local/bin/node） |
+| dsh-voice-chrome.service | CDP 专用 Chrome（graphical-session） |
+| dsh-voice-auth.service | 自动用新 token 认证 Chrome |
+| dsh-voice-loop.service | 麦克风环路 |
+| （插件）dsh-voice-assistant | 宿主启动时拉起 tts/autoread/bridge |
+
