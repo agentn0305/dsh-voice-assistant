@@ -1,0 +1,21 @@
+{
+  "name": "dsh-voice-assistant",
+  "version": "1.0.0",
+  "description": "Voice I/O for DeepSeek Harness: local ASR, wake word, TTS and CDP injection bridge, supervised as child processes",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

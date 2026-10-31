@@ -1,0 +1,12 @@
+# dsh-voice-assistant bundle patch
+# install: dsh plugin --profile web add link:<abs path to plugin/>
+- insert:
+    - id: voice-assistant
+      name: dsh-voice-assistant
+      config:
+        root: !!js process.env.HOME + '/project/test/voice-assistant'
+        services: [tts, autoread, bridge]
+        ttsEngine: edge
+        ttsVoice: zh-CN-XiaoxiaoNeural
+        kokoroVoice: zf_xiaoyi
+        wakeWords: '小艺,小艺小艺,你好小艺,小艺助手'
