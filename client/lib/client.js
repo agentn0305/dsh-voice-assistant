@@ -93,7 +93,8 @@ window.__ModuleLoader__.load({
 			}, VoiceStopButton));
 		}
 
-		const inject = [];
+		/** 客户端插件必须声明依赖的服务；不写 "slots"，ctx.slots 就是 undefined，激活会直接失败。 */
+		const inject = ["slots"];
 
 		exports.apply = apply;
 		exports.inject = inject;
