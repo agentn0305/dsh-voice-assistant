@@ -3,8 +3,13 @@
    四段全部本地；唤醒后的"把话交给 agent"通过 VOICE_CMD_URL 插件化接入（暂未接）。
    用法：voice_loop.py            实时麦克风
         voice_loop.py --wav x.wav  离线回放自测"""
-import argparse, json, os, queue, re, subprocess, sys, threading, time, urllib.request
+import argparse, errno, json, os, queue, re, socket, sys, threading, time, urllib.request
 import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:                 # 以脚本方式运行时 sys.path[0] 已是 src
+    sys.path.insert(0, HERE)
+import audio_io
 
 SR = 16000
 FRAME = 480                      # 30 ms
@@ -24,9 +29,28 @@ MIN_SPEECH_S = float(os.environ.get("VL_MIN_SPEECH", "0.35"))
 MAX_SPEECH_S = float(os.environ.get("VL_MAX_SPEECH", "10"))
 END_SILENCE_S = float(os.environ.get("VL_END_SILENCE", "0.55"))
 BARGE_MODE = os.environ.get("VL_BARGE", "off")     # off = 只认语音关键词；energy = 能量打断（无 AEC 会自激）
+LOCK_PORT = int(os.environ.get("VL_LOCK_PORT", "8767"))
 
 _rec = None
+_lock = None                    # 单实例锁，进程存活期间一直持有
 await_cmd_until = 0.0
+
+
+def acquire_lock(port=None):
+    """单实例锁：bind 127.0.0.1:LOCK_PORT（不设 SO_REUSEADDR，否则锁形同虚设）。"""
+    port = LOCK_PORT if port is None else port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        s.listen(1)             # 只为出现在 ss -ltnp 里；从不 accept
+    except OSError as exc:
+        s.close()
+        if exc.errno == errno.EADDRINUSE:
+            print(f"another voice_loop instance holds lock {port}, exiting", file=sys.stderr, flush=True)
+            sys.exit(0)
+        print(f"cannot bind voice_loop lock 127.0.0.1:{port}: {exc}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    return s
 
 
 def recognizer():
@@ -199,27 +223,27 @@ def handle_segment(rec, seg):
 
 
 def run_live():
+    global _lock
+    _lock = acquire_lock()               # 抢麦之前先抢锁，避免重复加载模型
+    try:
+        dev = audio_io.device_info(kind="input")      # 默认源会随 PipeWire 变化，日志里留痕
+    except Exception as exc:
+        dev = {"error": repr(exc)}
     rec = recognizer()
-    emit("ready", wake=WAKE_WORDS, model=os.path.basename(MODEL))
+    emit("ready", wake=WAKE_WORDS, model=os.path.basename(MODEL), input_device=dev)
     seg = Segmenter()
     idx = 0
     while True:
-        p = subprocess.Popen(["arecord", "-D", "default", "-f", "S16_LE", "-r", str(SR),
-                              "-c", "1", "-t", "raw", "-q", "-"], stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL)
         try:
-            while True:
-                chunk = p.stdout.read(FRAME * 2)
-                if len(chunk) < FRAME * 2:
-                    emit("capture_eof"); break
-                frame = np.frombuffer(chunk, dtype="<i2")
+            for frame in audio_io.record_stream(SR, 1, FRAME):
                 out = seg.push(frame, idx)
                 idx += 1
                 if out:
                     handle_segment(rec, out)
-        finally:
-            p.kill()
-        time.sleep(1)                       # arecord 挂了就重连
+            emit("capture_eof")
+        except Exception as exc:            # 设备被拔/占用：报出来，1 秒后重连
+            emit("capture_error", err=repr(exc))
+        time.sleep(1)
 
 
 def run_wav(path):

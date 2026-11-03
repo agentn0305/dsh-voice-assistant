@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""独立 TTS 进程：POST /speak {text} -> 清洗 Markdown -> 合成 -> ffplay 边收边播。
+"""独立 TTS 进程：POST /speak {text} -> 清洗 Markdown -> 合成 -> audio_io 播放。
    引擎：edge-tts 云端（默认，晓晓）/ kokoro 本地（保留，可切换）。不改 DSH 内核。"""
-import asyncio, json, os, re, subprocess, threading, time
+import asyncio, json, os, re, shutil, subprocess, sys, tempfile, threading, time
+import numpy as np
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:              # 以脚本方式运行时 sys.path[0] 已是 src
+    sys.path.insert(0, HERE)
+import audio_io
 ROOT = os.path.dirname(HERE)          # 项目根目录（src 的上一层）
 PORT = int(os.environ.get("TTS_PORT", "8765"))
 ENGINE = os.environ.get("TTS_ENGINE", "edge")              # edge | kokoro（kokoro 保留，按需懒加载）
@@ -20,7 +24,8 @@ EDGE_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 EDGE_RATE = os.environ.get("TTS_RATE", "+8%")
 
 _lock = threading.Lock()
-_proc = None
+_playback = None            # 当前播放句柄，POST /stop 用它打断
+_epoch = 0                  # 每次 /stop 自增，用来发现「合成/下载途中已被叫停」
 _engine = ENGINE
 _engine_info = {}
 
@@ -65,17 +70,21 @@ def split_sentences(text, max_len=12):
 
 
 def _kill():
-    global _proc
-    if _proc and _proc.poll() is None:
-        _proc.kill()
-    _proc = None
+    global _playback, _epoch
+    _epoch += 1
+    pb, _playback = _playback, None
+    if pb is not None:
+        pb.stop()
 
 
-def _player(sample_rate):
-    return subprocess.Popen(
-        ["ffplay", "-f", "s16le", "-ar", str(sample_rate), "-ch_layout", "mono",
-         "-nodisp", "-autoexit", "-loglevel", "error", "-"],
-        stdin=subprocess.PIPE)
+def _own(pb, epoch):
+    """登记播放句柄；若期间已被 /stop，立刻停掉并返回 None。"""
+    global _playback
+    if epoch != _epoch:
+        pb.stop()
+        return None
+    _playback = pb
+    return pb
 
 
 class KokoroEngine:
@@ -98,13 +107,12 @@ class KokoroEngine:
             return None
         samples, sr = self.k.create(ph, voice=voice or KOKORO_VOICE, speed=KOKORO_SPEED, is_phonemes=True)
         self.sr = sr
-        return (samples * 32767).astype("<i2").tobytes()
+        return np.asarray(samples, dtype=np.float32)
 
 
 def _speak_pipelined(engine, text, voice=None):
-    """生产-消费流水线：一边合成下一句，一边把前一句推进播放器。"""
+    """生产-消费流水线：一边合成下一句，一边把前一句交给 audio_io 播放。"""
     import queue as _q
-    global _proc
     q = _q.Queue(maxsize=4)
     errs = []
 
@@ -115,7 +123,7 @@ def _speak_pipelined(engine, text, voice=None):
                     data = engine.synth(s, voice)
                 except TypeError:
                     data = engine.synth(s)
-                if data:
+                if data is not None and len(data):
                     q.put(data)
         except Exception as exc:
             errs.append(exc)
@@ -129,55 +137,123 @@ def _speak_pipelined(engine, text, voice=None):
     if chunk is None:
         return {"finished": False, "error": repr(errs[0]) if errs else "no audio"}
     _kill()
-    proc = _player(engine.sr)
-    _proc = proc
+    epoch = _epoch
     while chunk is not None:
-        if proc.poll() is not None:
-            return {"finished": False, "interrupted": True}
-        try:
-            proc.stdin.write(chunk)
-            proc.stdin.flush()
-        except BrokenPipeError:
+        pb = _own(audio_io.play_pcm(chunk, engine.sr), epoch)
+        if pb is None or not pb.wait():
             return {"finished": False, "interrupted": True}
         chunk = q.get()
-    try:
-        proc.stdin.close()
-    except Exception:
-        pass
-    proc.wait()
     return {"finished": True, "firstChunkMs": first_ms}
 
 
 def _speak_edge(text, voice=None):
-    global _proc
+    """edge-tts 只出 mp3 流：POSIX 上有 ffplay 就边下边播，否则落盘交 audio_io.play_file。"""
+    ffplay = shutil.which("ffplay") if os.name == "posix" else None
+    if ffplay:
+        return _speak_edge_stream(text, voice, ffplay)
+    return _speak_edge_file(text, voice)
+
+
+def _speak_edge_stream(text, voice, ffplay):
+    """把 mp3 字节直接写进 ffplay 的 stdin：首音不用等整段下完；/stop 直接杀子进程。"""
     import edge_tts
     voice = voice or EDGE_VOICE
     _kill()
-    proc = subprocess.Popen(["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-"], stdin=subprocess.PIPE)
-    _proc = proc
+    epoch = _epoch
     t0 = time.perf_counter()
     first = None
+    proc = subprocess.Popen([ffplay, "-hide_banner", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                             "-i", "pipe:0"], stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _stop():
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def _wait(timeout=None):
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception:
+            return True
+
+    pb = _own(audio_io.Playback(_wait, _stop), epoch)   # 先挂句柄，下载途中 /stop 也能杀 ffplay
+    if pb is None:
+        return {"finished": False, "interrupted": True}
 
     async def run():
         nonlocal first
         async for ch in edge_tts.Communicate(text, voice, rate=EDGE_RATE).stream():
             if ch["type"] != "audio":
                 continue
+            if epoch != _epoch:                 # 下载途中已被 /stop：停止拉流
+                return False
             if first is None:
                 first = (time.perf_counter() - t0) * 1000
-            proc.stdin.write(ch["data"])
-            proc.stdin.flush()
+            try:
+                proc.stdin.write(ch["data"])
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):      # ffplay 已退出/被杀
+                return False
+        return True
 
     try:
-        asyncio.run(run())
-    except BrokenPipeError:
-        return {"finished": False, "interrupted": True}
+        if not asyncio.run(run()):
+            _stop()
+            _wait(2)
+            return {"finished": False, "interrupted": True}
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        finished = pb.wait()
+        return {"finished": finished, "firstChunkMs": round(first or 0),
+                **({} if finished else {"interrupted": True})}
+    except Exception as exc:            # 别把网络/ffplay 异常交给上层当「edge 不可用」回退
+        return {"finished": False, "error": repr(exc)[:160]}
+    finally:
+        _stop()
+
+
+def _speak_edge_file(text, voice=None):
+    """没有 ffplay（Windows）：整段 mp3 落临时文件，再交 audio_io.play_file（miniaudio 解码）。"""
+    import edge_tts
+    voice = voice or EDGE_VOICE
+    _kill()
+    epoch = _epoch
+    fd, path = tempfile.mkstemp(prefix="vl-tts-", suffix=".mp3")
+    os.close(fd)
+    t0 = time.perf_counter()
+    first = None
+
+    async def run():
+        nonlocal first
+        with open(path, "wb") as f:
+            async for ch in edge_tts.Communicate(text, voice, rate=EDGE_RATE).stream():
+                if ch["type"] != "audio":
+                    continue
+                if epoch != _epoch:          # 下载途中已被 /stop：停止拉流
+                    return False
+                if first is None:
+                    first = (time.perf_counter() - t0) * 1000
+                f.write(ch["data"])
+        return True
+
     try:
-        proc.stdin.close()
-    except Exception:
-        pass
-    proc.wait()
-    return {"finished": True, "firstChunkMs": round(first or 0)}
+        if not asyncio.run(run()):
+            return {"finished": False, "interrupted": True}
+        pb = _own(audio_io.play_file(path), epoch)
+        ok = pb is not None and pb.wait()
+        return {"finished": ok, "firstChunkMs": round(first or 0), **({} if ok else {"interrupted": True})}
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 _engines = {}
