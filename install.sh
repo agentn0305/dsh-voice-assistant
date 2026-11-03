@@ -70,7 +70,7 @@ say "6/6 自检"
 
 cat <<'EOF'
 
-—— 还需手工完成两步 ——
+—— 还需手工完成三步 ——
 
 1) 专用 Chrome（注入通道），并用 dsh web 打印的 token URL 认证一次：
    google-chrome --remote-debugging-port=9222 \
@@ -79,6 +79,10 @@ cat <<'EOF'
 
 2) 启用语音环路（会常驻占用麦克风）：
    systemctl --user enable --now dsh-voice-loop.service
+
+3) 把「停止朗读」按钮装进同一个 profile（client/ 是与 plugin/ 分开的第二个包）：
+   dsh plugin --profile <name> add -w link:$(pwd)/client
+   刷新 DSH 页面后，每条回答下方的操作条里会出现「停止朗读」。
 
 验证：对着麦克风说「小艺，现在几点了」
 EOF

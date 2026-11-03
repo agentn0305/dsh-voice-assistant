@@ -23,6 +23,19 @@ KOKORO_SPEED = float(os.environ.get("TTS_KOKORO_SPEED", "1.0"))
 EDGE_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 EDGE_RATE = os.environ.get("TTS_RATE", "+8%")
 
+
+def parse_origins(raw: str) -> tuple:
+    """逗号分隔的白名单 → 元组，忽略空项与前后空白。"""
+    return tuple(o.strip() for o in raw.split(",") if o.strip())
+
+
+# 浏览器页面（127.0.0.1:3080 / localhost:3080）跨域调用本服务；只回显白名单内的 Origin
+ALLOWED_ORIGINS = parse_origins(os.environ.get(
+    "TTS_ALLOWED_ORIGINS", "http://127.0.0.1:3080,http://localhost:3080"))
+CORS_METHODS = "GET, POST, OPTIONS"
+CORS_HEADERS = "Content-Type"
+CORS_MAX_AGE = "600"
+
 _lock = threading.Lock()
 _playback = None            # 当前播放句柄，POST /stop 用它打断
 _epoch = 0                  # 每次 /stop 自增，用来发现「合成/下载途中已被叫停」
@@ -290,13 +303,36 @@ def load_engines():
 
 
 class H(BaseHTTPRequestHandler):
+    def _allowed_origin(self):
+        """先做白名单校验再回显 Origin，绝不返回 *。"""
+        origin = self.headers.get("Origin")
+        return origin if origin in ALLOWED_ORIGINS else None
+
+    def _send_cors(self, origin):
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", CORS_METHODS)
+        self.send_header("Access-Control-Allow-Headers", CORS_HEADERS)
+        self.send_header("Access-Control-Max-Age", CORS_MAX_AGE)
+        self.send_header("Vary", "Origin")
+
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        origin = self._allowed_origin()
+        if origin:
+            self._send_cors(origin)
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        origin = self._allowed_origin()
+        self.send_response(204 if origin else 403)
+        if origin:
+            self._send_cors(origin)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         if self.path == "/health":

@@ -13,3 +13,8 @@
         ttsVoice: zh-CN-XiaoxiaoNeural
         kokoroVoice: zf_xiaoyi
         wakeWords: '小艺,小艺小艺,你好小艺,小艺助手'
+    # 浏览器端插件：往助手消息操作条里加一个「停止朗读」按钮。
+    # 必须出现在 insert 列表里，否则 loader 不会扫描到它，/plugins 下也就没有 bundle。
+    # 安装时需单独再 add 一次：dsh plugin --profile <name> add -w link:<repo>/client
+    - id: voice-stop-button
+      name: dsh-voice-stop-button

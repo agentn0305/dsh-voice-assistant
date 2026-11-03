@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   dsh-voice-assistant Windows 安装器（幂等，可重复执行）。
@@ -250,14 +250,17 @@ if (Test-Path $profilesDir) {
   Write-Host ("  尚未创建 profile 目录: " + $profilesDir)
 }
 $linkPath = (Join-Path $Root "plugin").Replace("\", "/")
+$clientLinkPath = (Join-Path $Root "client").Replace("\", "/")
 Write-Host ""
 Write-Host "  第 1 步：确认真实 profile 名（Desktop 与 web 可能不同）"
 Write-Host '    Get-ChildItem $HOME\.dsh\profiles -Directory | Where-Object { $_.Name -ne "node_modules" } | Select-Object -ExpandProperty Name'
 Write-Host "  第 2 步：安装（把 <name> 换成上面列出的名字）"
 Write-Host ("    dsh plugin --profile <name> add -w link:" + $linkPath)
-Write-Host "  第 3 步：校验配置树（不会启动服务）"
+Write-Host "  第 3 步：安装「停止朗读」按钮包（同一个 profile，需要再 add 一次）"
+Write-Host ("    dsh plugin --profile <name> add -w link:" + $clientLinkPath)
+Write-Host "  第 4 步：校验配置树（不会启动服务）"
 Write-Host "    dsh --profile <name> --dump-config | Select-String voice-assistant"
-Write-Host "  第 4 步：启动 DSH 宿主，插件会拉起 tts/autoread/bridge/loop 四个子进程"
+Write-Host "  第 5 步：启动 DSH 宿主，插件会拉起 tts/autoread/bridge/loop 四个子进程"
 Write-Host "           端口被其它实例占用时，插件保持被动（不会抢端口）"
 Write-Host ""
 Write-Host "  验证（新开一个 PowerShell）:"
@@ -273,4 +276,4 @@ if ($script:Warnings.Count -gt 0) {
   Write-Host "需人工处理:" -ForegroundColor Yellow
   foreach ($w in $script:Warnings) { Write-Host ("  - " + $w) -ForegroundColor Yellow }
 }
-Say "完成。下一步：按上面第 1-4 步安装插件并启动宿主。"
+Say "完成。下一步：按上面第 1-5 步安装插件并启动宿主。"

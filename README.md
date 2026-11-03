@@ -252,6 +252,7 @@ voice-assistant/
 │       ├── launch.mjs            启动专用 Chrome
 │       └── {send,eval,auth,clear}.mjs  CDP 操作
 ├── plugin/                       DSH 插件包（宿主托管子服务）
+├── client/                       浏览器插件包（「停止朗读」按钮）
 ├── deploy/*.service              systemd 单元模板
 ├── scripts/{healthcheck,speak}.sh
 ├── scripts/download-models.{sh,ps1}
@@ -349,6 +350,35 @@ dsh plugin --profile <name> add -w link:C:/path/to/voice-assistant/plugin   # Wi
 8766/8767 被占则只跳过对应服务，不会抢端口。
 插件不硬编码项目路径：依次读 `config.root` → `DSH_VOICE_ROOT` → 自身所在仓库。
 Windows 全流程见上文 [Windows 章节](#windows从零到说唤醒词--注入--朗读)。
+
+### 停止朗读按钮
+
+按钮装在独立的浏览器端插件包 `client/`（包名 `dsh-voice-stop-button`）里，
+与 `plugin/` 是两个包，所以在 profile 里要**额外 add 一次**：
+
+```bash
+dsh plugin --profile <name> add -w link:$(pwd)/client    # Linux
+```
+
+```powershell
+dsh plugin --profile <name> add -w link:C:/path/to/voice-assistant/client   # Windows
+```
+
+装完要**重启一次宿主**才生效（bundle 列表在宿主启动时组合，只刷新页面看不到），
+重启前不会有任何副作用；它在
+`conversation.chat.assistant-actions` 槽位注册一个条目，**每条已完成的回答下方**
+都会多出「停止朗读」（带方形停止符号）。
+
+点击后浏览器直接 `POST http://127.0.0.1:8765/stop`：
+
+- 成功 → 按钮位置短暂显示「已停止」，1.5 秒后恢复「停止朗读」；
+- 失败（TTS 服务没起来或端口不通）→ 显示「未在朗读」，不抛异常、不弹窗。
+
+跨域由 `src/tts_server.py` 的白名单处理，页面 Origin 需在 `TTS_ALLOWED_ORIGINS` 里
+（默认 `http://127.0.0.1:3080`、`http://localhost:3080`）。用别的端口打开 Web UI 时，
+要么把该 Origin 加进环境变量，要么按钮会显示「未在朗读」。
+
+**它只停止朗读，不打断对话生成。**
 
 ### 与 systemd 共存 / 迁移（Linux）
 
