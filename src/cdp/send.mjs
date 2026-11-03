@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // 用法: node cdp_send.mjs "<要注入的文本>" [--no-enter]
 // 通过 CDP 把文本真实键入 DSH 输入框，并回车发送。
+import { cdpBaseUrl } from "./chrome.mjs"
+
 const text = process.argv[2] || ""
 const pressEnter = !process.argv.includes("--no-enter")
 
-const list = await (await fetch("http://127.0.0.1:9222/json/list")).json()
+const list = await (await fetch(cdpBaseUrl() + "/json/list")).json()
 const page = list.find(t => t.type === "page" && t.url.includes("3080"))
-if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page" })); process.exit(1) }
+if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page", cdp: cdpBaseUrl(), hint: "start Chrome with: node src/cdp/launch.mjs" })); process.exit(1) }
 
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let id = 0; const pending = new Map()

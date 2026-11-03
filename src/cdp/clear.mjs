@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // 清空 DSH 输入框：聚焦 → Ctrl+A → Backspace（真实键盘事件，React 受控组件才认）
-const list = await (await fetch(process.env.VB_CDP_URL || "http://127.0.0.1:9222/json/list")).json()
+import { cdpBaseUrl } from "./chrome.mjs"
+
+const list = await (await fetch(cdpBaseUrl() + "/json/list")).json()
 const page = list.find(t => t.type === "page" && t.url.includes("3080"))
-if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page" })); process.exit(1) }
+if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page", cdp: cdpBaseUrl(), hint: "start Chrome with: node src/cdp/launch.mjs" })); process.exit(1) }
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let id = 0; const pending = new Map()
 const send = (m, p) => { const mid = ++id; ws.send(JSON.stringify({ id: mid, method: m, params: p })); return new Promise(r => pending.set(mid, r)) }

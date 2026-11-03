@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-assistant",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Voice I/O for DeepSeek Harness: local ASR, wake word, TTS and CDP injection bridge, supervised as child processes",
   "type": "module",
   "main": "lib/index.js",

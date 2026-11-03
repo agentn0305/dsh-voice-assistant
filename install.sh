@@ -15,8 +15,17 @@ die() { printf '\033[1;31m错误: %s\033[0m\n' "$*" >&2; exit 1; }
 say "1/6 检查前置依赖"
 command -v node >/dev/null || die "缺少 node（需 >= 22.6 且带 TypeScript 支持）"
 command -v uv   >/dev/null || die "缺少 uv（curl -LsSf https://astral.sh/uv/install.sh | sh）"
-command -v ffplay >/dev/null || die "缺少 ffplay（sudo apt install ffmpeg）"
-command -v arecord >/dev/null || die "缺少 arecord（sudo apt install alsa-utils）"
+if command -v ffplay >/dev/null; then
+  echo "  ✓ ffplay 可用（edge-tts 流式播放，首音更快）"
+else
+  echo "  ⚠ 未找到 ffplay（可选）：edge-tts 将整段下载后用 miniaudio 播放，首音约 2s"
+fi
+if ldconfig -p 2>/dev/null | grep -q 'libportaudio\.so\.2'; then
+  echo "  ✓ libportaudio2 已安装"
+else
+  echo "  ⚠ 未找到 libportaudio2（sounddevice 需要）；建议: sudo apt install libportaudio2"
+  echo "    代码会自动探测常见路径并设置 VL_PORTAUDIO_LIB，全部落空时才报错"
+fi
 command -v google-chrome >/dev/null || echo "  ⚠ 未找到 google-chrome，注入通道需要它"
 node -p "process.features.typescript" | grep -q strip || echo "  ⚠ node 不支持类型擦除（DSH run_code 可能不可用）"
 
@@ -25,7 +34,7 @@ say "2/6 Python 环境"
 . .venv/bin/activate
 
 say "3/6 安装依赖"
-uv pip install -i "$TSINGHUA" edge-tts sherpa-onnx kokoro-onnx "misaki[zh]"
+uv pip install -i "$TSINGHUA" edge-tts sherpa-onnx kokoro-onnx "misaki[zh]" "sounddevice>=0.5" "miniaudio>=1.59"
 
 say "4/6 下载模型（断点续传 + 代理）"
 mkdir -p kokoro && cd kokoro

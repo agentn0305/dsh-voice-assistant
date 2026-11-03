@@ -26,7 +26,7 @@
          ┌──────────────────────────── 语音输入链路 ────────────────────────────┐
          │                                                                      │
   🎤 USB 麦克风                                                               │
-         │ arecord -D default -f S16_LE -r 16000 -c 1 -t raw                   │
+         │ sounddevice (PortAudio) · 16 kHz mono                               │
          ▼                                                                      │
   src/voice_loop.py ── 能量 VAD（30ms 帧 / 自适应底噪 / 0.55s 收尾静音）            │
          │                                                                      │
@@ -55,7 +55,7 @@
       src/tts_server.py :8765  ── edge-tts(晓晓) / kokoro(本地兜底)                 │
            │ 流式合成 + 按句切分                                                 │
            ▼                                                                    │
-  🔊 扬声器 ◄── ffplay                                                        
+  🔊 扬声器 ◄── sounddevice / miniaudio（POSIX 可选 ffplay 流式）
          └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -64,6 +64,15 @@
 1. 语音输入链路与 DSH 完全解耦：环路只依赖一个 HTTP 端点（`VL_CMD_URL`）
 2. 播报链路是**只读旁路**：解析会话日志，不影响 DSH 运行
 3. 注入链路走浏览器协议，不碰 DSH 内部 RPC
+
+### 2.1 音频链路（v1.3 现状）
+
+- **采集/播放不再依赖外部命令**：采集已移除 `arecord`；播放主路径是 sounddevice（PCM）；mp3 文件由 miniaudio 解码，`ffplay` 仅作最后回退。`src/audio_io.py` 用 sounddevice 回调 + 队列做 `record_stream`，用 `play_pcm` / `Playback(stop/wait)` 做播放；`play_file` 先试 miniaudio。
+- **Linux PortAudio**：`sudo apt install libportaudio2`。默认导入失败时按固定路径自愈（`~/.local/lib/portaudio`、`/usr/lib/x86_64-linux-gnu`、`/usr/lib/aarch64-linux-gnu`、`/usr/local/lib`、`/usr/lib`、项目 `vendor/`、`vendor/portaudio/`），命中则设 `VL_PORTAUDIO_LIB` 重试；全落空才报错并打印 apt / `dpkg-deb -x` 方案。
+- **单实例**：`voice_loop.py` 启动时 bind `127.0.0.1:8767`（`VL_LOCK_PORT` 覆盖）。被占时打印 `another voice_loop instance holds lock 8767, exiting` 并 `exit(0)`；插件守卫用同一端口。
+- **设备诊断**：`ready` 事件带 `input_device`（index/name/spec/channels/default_samplerate）；`.venv/bin/python src/audio_io.py --list` 打印设备表与实际录音/播放设备；`VL_INPUT_DEVICE` / `VL_OUTPUT_DEVICE` 接受名称子串或数字索引。PortAudio 对系统默认源可能只报别名 `default`（本机 index 18），真实节点名在设备表里。
+- **edge-tts 播放**：POSIX 有 `ffplay` 时流式，首音 1.07–1.5 s（受云端首包限制）；Windows 无 `ffplay` 时写临时文件 + miniaudio 整段解码，首音约 2.0 s。两条路径都能被 `/stop` 打断。
+- **Kokoro 不变**：`firstChunkMs` 514–867，24 kHz float32。
 
 ---
 
@@ -167,6 +176,7 @@
 ```
 edge-tts 7.3.1 · kokoro-onnx 0.6.1 · misaki 0.9.4 · onnxruntime 1.31.1
 sherpa-onnx 2.0.1 · sherpa-onnx-core 2.0.1 · phonemizer 3.4.0 · numpy 2.5.4
+sounddevice >=0.5 · miniaudio >=1.59 · PortAudio（Linux 系统库 libportaudio2）
 ```
 
 > piper-tts 曾安装并跑通（首包 45–160 ms），后按要求卸载，模型 63 MB 已删除。
@@ -216,7 +226,8 @@ sherpa-onnx 2.0.1 · sherpa-onnx-core 2.0.1 · phonemizer 3.4.0 · numpy 2.5.4
 
 | 引擎 | 首包 | 采样率 | 网络 |
 |---|---|---|---|
-| edge 晓晓 | 1037–1560 ms | 24 kHz | 依赖 |
+| edge 晓晓（POSIX，ffplay 流式） | 1070–1500 ms | 24 kHz | 依赖 |
+| edge 晓晓（Windows，无 ffplay） | ~2000 ms | 24 kHz | 依赖 |
 | kokoro fp32 | 457–772 ms | 24 kHz | 无 |
 | kokoro int8 | 711–793 ms | 24 kHz | 无 |
 | ~~piper huayan~~ | ~~45–160 ms~~ | 22.05 kHz | 无（已卸载） |
@@ -316,7 +327,7 @@ VL_WAKE="小艺,你好小艺,贾维斯" .venv/bin/python src/voice_loop.py
 |---|---|---|
 | 桥返回 `page not authenticated` | DSH 宿主重启，token 变了 | 用新 token URL 在 Chrome 窗口重新打开 |
 | 桥返回 `composer not found` | 页面未加载完 / 不在会话页 | 等待或手动切到会话页 |
-| 唤醒无反应 | 音量过低 / 麦克风被占用 | 看环路日志有无 `heard`；`arecord -d 3 /tmp/t.wav` 验证 |
+| 唤醒无反应 | 音量过低 / 麦克风被占用 | 看环路日志有无 `heard`；`.venv/bin/python src/audio_io.py --list` 确认设备与索引 |
 | 播报没声音 | edge 网络失败 | 看 `/health` 的 `edgeConsecutiveFailures`；会自动降级 kokoro |
 | 循环刷 `barge_in` | 能量打断被开启且无 AEC | 确认 `VL_BARGE=off`（默认） |
 | 服务不自启 | 未开 linger | `loginctl enable-linger $USER` |
@@ -416,15 +427,15 @@ voice-assistant/
 
 ---
 
-## 15. DSH 插件形态（v1.2）
+## 15. DSH 插件形态（v1.3）
 
 同一套能力除了以 systemd 常驻，也已打包为**标准 DSH 插件**，可被宿主直接加载：
 
 ```
 plugin/
 ├── package.json          name=dsh-voice-assistant, main=lib/index.js, dsh.bundle.patch=cordis.patch.yml
-├── cordis.patch.yml      insert 一行插件配置（root/services/引擎/音色/唤醒词）
-└── lib/index.js          cordis 插件：apply(ctx, config) 里 spawn 子进程，ctx.effect 负责清理
+├── cordis.patch.yml      insert 一行插件配置（services/引擎/音色/唤醒词；不写死路径）
+└── lib/index.js          cordis 插件：apply(ctx, config) 里 spawn 子进程（shell:false），ctx.effect 负责清理
 ```
 
 ### 为什么不会被兼容性守卫拦
@@ -435,29 +446,34 @@ plugin/
 ### 安装
 
 ```bash
-dsh plugin --profile web add link:$(pwd)/plugin
+dsh plugin --profile <name> add -w link:$(pwd)/plugin
+# profile 名见 ~/.dsh/profiles；-w 是 pnpm workspace-root，缺少会报 ERR_PNPM_ADDING_TO_ROOT
 # 重启宿主后生效（bundle 列表变更需要重启）
 ```
 
 ### 端口守卫（重要设计）
 
-插件启动前先探测 8765/8766：
+插件启动前按服务探测 **8765（tts）/ 8766（bridge）/ 8767（loop 锁）**：
 
-- **端口空闲** → 插件接管，spawn tts / autoread / bridge
-- **端口被占** → 判定为"外部托管"，插件整体保持被动，只记一条日志
+- **8765 空闲** → 插件接管，spawn tts / autoread / bridge / loop，并把 `VL_LOCK_PORT` 传给 loop
+- **8765 被占** → 判定为"外部托管"，整组保持被动（含 autoread 与 loop），只记一条日志
+- **8765 空闲但 8766 被占** → 只跳过 bridge，其余照常
+- **8767 被占** → 只跳过 loop（外部已有环路在开麦）
 
-这条规则避免了两类事故：
+这条规则避免了三类事故：
 1. systemd 与插件同时启动 → 端口冲突
 2. autoread 没有端口，被重复拉起 → **重复朗读**（实测踩到过）
+3. 两个 voice_loop 同时开麦 → 抢设备/重复派发
 
 ### 二选一迁移
 
 | 目标 | 操作 |
 |---|---|
-| 用插件托管 | `systemctl --user disable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service` 后重启宿主 |
-| 退回 systemd | `dsh plugin --profile web remove dsh-voice-assistant` 后 `systemctl --user enable --now ...` |
+| 用插件托管 | `systemctl --user disable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service dsh-voice-loop.service` 后重启宿主 |
+| 退回 systemd | `dsh plugin --profile <name> remove dsh-voice-assistant` 后 `systemctl --user enable --now ...` |
 
 ### 子进程日志
 
-`~/.dsh/logs/voice-assistant/{tts,autoread,bridge}.log`
+插件写系统临时目录：`$TMPDIR/dsh-voice-assistant/{tts,autoread,bridge,loop}.log`；
+Windows 为 `%TEMP%\dsh-voice-assistant\*.log`。
 

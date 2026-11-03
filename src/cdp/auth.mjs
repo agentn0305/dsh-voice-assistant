@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // 用给定的 token URL 给 CDP 专用 Chrome 窗口完成认证
 // 用法: node auth.mjs "http://127.0.0.1:3080/?token=..."
+import { cdpBaseUrl } from "./chrome.mjs"
+
 const url = process.argv[2]
 if (!url) { console.log(JSON.stringify({ ok: false, error: "usage: auth.mjs <token-url>" })); process.exit(1) }
-const list = await (await fetch(process.env.VB_CDP_URL || "http://127.0.0.1:9222/json/list")).json()
+const list = await (await fetch(cdpBaseUrl() + "/json/list")).json()
 const page = list.find(t => t.type === "page" && t.url.includes("3080"))
-if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page in CDP" })); process.exit(2) }
+if (!page) { console.log(JSON.stringify({ ok: false, error: "no dsh page in CDP", cdp: cdpBaseUrl(), hint: "start Chrome with: node src/cdp/launch.mjs" })); process.exit(2) }
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let id = 0; const pending = new Map()
 const send = (m, p) => { const mid = ++id; ws.send(JSON.stringify({ id: mid, method: m, params: p })); return new Promise(r => pending.set(mid, r)) }

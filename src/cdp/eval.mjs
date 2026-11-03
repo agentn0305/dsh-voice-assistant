@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// 用法: node cdp.mjs "<js表达式>" [--ws <wsUrl>]
+// 用法: node eval.mjs "<js表达式>" [--ws <wsUrl>]
+import { cdpBaseUrl } from "./chrome.mjs"
+
 const expr = process.argv[2]
 const wsArgIdx = process.argv.indexOf("--ws")
 const wsUrl = wsArgIdx > 0 ? process.argv[wsArgIdx + 1] : (await targetWs())
 
 async function targetWs() {
-  const list = await (await fetch("http://127.0.0.1:9222/json/list")).json()
-  const page = list.find(t => t.type === "page" && t.url.includes("127.0.0.1:3080"))
-  if (!page) throw new Error("no dsh page target")
+  const list = await (await fetch(cdpBaseUrl() + "/json/list")).json()
+  const page = list.find(t => t.type === "page" && t.url.includes("3080"))
+  if (!page) throw new Error("no dsh page target in " + cdpBaseUrl() + " (run: node src/cdp/launch.mjs)")
   return page.webSocketDebuggerUrl
 }
 

@@ -1,5 +1,9 @@
 .venv/
 kokoro/
+models/
+*.onnx
+*.bin
 **/__pycache__/
 *.pyc
 .env
+config/windows.env
