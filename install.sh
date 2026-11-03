@@ -62,7 +62,8 @@ fi
 say "5b/6 安装 systemd 单元"
 install -m644 deploy/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service
+# 只安装单元文件，不自动启用：tts/autoread/bridge/loop 同一时刻只应有一个托管方
+# （插件 或 systemd），二选一见 README「与 systemd 共存 / 迁移」
 loginctl enable-linger "$USER" 2>/dev/null || echo "  ⚠ 未能开启 linger（需要管理员权限）"
 
 say "6/6 自检"
@@ -77,12 +78,18 @@ cat <<'EOF'
      --user-data-dir=$HOME/.dsh-voice-chrome \
      --no-first-run --new-window http://127.0.0.1:3080
 
-2) 启用语音环路（会常驻占用麦克风）：
-   systemctl --user enable --now dsh-voice-loop.service
+2) 选一种托管方式（二选一，绝不要两边同时开，否则会有两个 loop 抢麦克风）：
 
-3) 把「停止朗读」按钮装进同一个 profile（client/ 是与 plugin/ 分开的第二个包）：
-   dsh plugin --profile <name> add -w link:$(pwd)/client
-   刷新 DSH 页面后，每条回答下方的操作条里会出现「停止朗读」。
+   A. 插件托管（推荐，随 DSH 宿主启停）：
+      dsh plugin --profile <name> add -w link:$(pwd)/plugin
+      dsh plugin --profile <name> add -w link:$(pwd)/client   # 「停止朗读」按钮
+      systemctl --user enable --now dsh-voice-chrome.service dsh-voice-auth.service
+
+   B. systemd 托管（不用插件，四个单元独立常驻）：
+      systemctl --user enable --now dsh-tts.service dsh-autoread.service \
+        dsh-voice-bridge.service dsh-voice-loop.service
+
+   选了 A 就不要再 enable dsh-voice-loop.service；反过来的迁移步骤见 README。
 
 验证：对着麦克风说「小艺，现在几点了」
 EOF

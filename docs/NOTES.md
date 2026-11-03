@@ -239,3 +239,28 @@ ast 层检查不到。教训：校验用 `python -m py_compile`，不要只做 a
 | dsh-voice-loop.service | 麦克风环路 |
 | （插件）dsh-voice-assistant | 宿主启动时拉起 tts/autoread/bridge |
 
+## 「停止朗读」按钮 + 双 loop 事故（2026-11-03）
+
+### 停止朗读按钮
+- 需求：回答自动朗读之外，还要能在消息下方一键叫停
+- 实现：独立的浏览器端插件包 `client/`（包名 `dsh-voice-stop-button`），注册槽位
+  `conversation.chat.assistant-actions`（order 30），渲染「停止朗读」，点击 POST `127.0.0.1:8765/stop`
+- 坑 1：只执行 `dsh plugin add client` 不够——还得写进 `plugin/cordis.patch.yml` 的 insert
+  （`- id: voice-stop-button`），否则 `--dump-config` 里看不到、bundle 不会被挂出
+- 坑 2：`client.js` 里 `const inject = []` 会让 `ctx.slots` 为 `undefined`，浏览器控制台报
+  `web boot: 1 entry did not activate / dsh-voice-stop-button: failed`；改成 `["slots"]` 后
+  `document.querySelectorAll('[data-voice-stop]').length` = 7（等于当前消息条数）
+- 坑 3：页面 origin 是 3080、TTS 在 8765，属跨域；`tts_server.py` 原本没有任何 CORS 头，按钮会被浏览器直接拦。
+  加白名单回显（不用 `*`）+ `do_OPTIONS`，`TTS_ALLOWED_ORIGINS` 可覆盖，用例在 `tests/test_tts_cors.py`（11 个）
+- 验证局限：bundle 在宿主启动/重载时才注册，按钮的实际外观只能靠刷新页面用肉眼确认
+
+### 双 loop 事故
+- 现象：一句「小艺，现在几点了」被识别两次，命令被 `/inject` 两次
+- 原因：systemd 的 `dsh-voice-loop`（10-31 启动、旧代码，不含 8767 锁）与插件 loop 并存；
+  8767 守卫只对带锁的新版 loop 有效，探不到老进程
+- 处理：`systemctl --user disable --now dsh-voice-loop.service`，只留插件 loop
+  （上文「开机自启清单」里的 loop 一项据此作废）
+- 当时另有两条 `dispatch_failed <HTTPError 502>`，是验证时反复 reload 页面导致注入脚本找不到输入框，
+  不是链路故障；`node src/cdp/send.mjs '' --no-enter` 返回 `{"ok":true,...}` 可证
+- 教训：切换托管方后必须核对 `pgrep -af voice_loop` 只有一条
+

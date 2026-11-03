@@ -36,10 +36,26 @@ git clone <repo> && cd voice-assistant
 google-chrome --remote-debugging-port=9222 \
   --user-data-dir=$HOME/.dsh-voice-chrome \
   --no-first-run --new-window http://127.0.0.1:3080
-
-# 2) 启用语音环路（会常驻占用麦克风，确认后再开）
-systemctl --user enable --now dsh-voice-loop.service
 ```
+
+`install.sh` 只安装 systemd 单元、**不会启用**它们。第 2 步是选一个托管方，二选一：
+
+**A. 插件托管（推荐）**——tts / autoread / bridge / loop 由 DSH 宿主拉起，跟着宿主启停：
+
+```bash
+dsh plugin --profile <name> add -w link:$(pwd)/plugin
+dsh plugin --profile <name> add -w link:$(pwd)/client    # 「停止朗读」按钮
+systemctl --user enable --now dsh-voice-chrome.service dsh-voice-auth.service
+```
+
+**B. systemd 托管**——不用插件，四个单元独立常驻：
+
+```bash
+systemctl --user enable --now dsh-tts.service dsh-autoread.service \
+  dsh-voice-bridge.service dsh-voice-loop.service
+```
+
+两边**不要同时开**：loop 会同时听麦克风，一句话被识别两次、命令注入两次。详见 [排错](#排错)。
 
 ## Windows（从零到「说唤醒词 → 注入 → 朗读」）
 
@@ -270,6 +286,9 @@ voice-assistant/
 | `dsh-voice-bridge.service` | 8766 | 注入桥 |
 | `dsh-voice-loop.service` | — | 麦克风环路（可选，占麦） |
 
+四个服务有两种托管方式，**同一时刻只能选一种**：插件（作为 DSH 宿主子进程）或 systemd（独立单元）。
+混用最典型的后果是两个 loop 同时开麦，见 [排错](#排错)。
+
 ## 配置
 
 其余键位见 `config/.env.example`；音频相关新增项如下。
@@ -382,17 +401,42 @@ dsh plugin --profile <name> add -w link:C:/path/to/voice-assistant/client   # Wi
 
 ### 与 systemd 共存 / 迁移（Linux）
 
-插件在启动麦克风环路前会探测本机 **8767**（`config.lockPort` / 环境变量 `VL_LOCK_PORT`，默认 8767）。
-若 systemd 的 `dsh-voice-loop` 已在运行，该端口被占用，插件会记录
-`loop already running externally (lock port 8767 busy), skipping` 并跳过 loop，不会出现两个进程同时开麦。
-空闲时插件正常启动 loop，并把 `VL_LOCK_PORT` 写进子进程环境。
+这四个子服务（tts 8765 / bridge 8766 / loop / autoread）同一时刻只能有一个托管方：
+插件（DSH 宿主拉起子进程）或 systemd（独立单元）。
 
-- **只想让 systemd 管 loop、插件管其余服务**：保持现状，无需改动。
-- **想让插件全托管**：先 `systemctl --user disable --now dsh-voice-loop`，确认
-  `ss -ltnp | grep 8767` 无输出，再重启 DSH。
-- **回迁 systemd**：`dsh plugin --profile <name> remove dsh-voice-assistant`，然后
-  `systemctl --user enable --now dsh-tts.service dsh-autoread.service dsh-voice-bridge.service dsh-voice-loop.service`。
+插件启动前会探测端口：8765 被占 → 整组保持被动；8766 / 8767 被占 → 只跳过对应服务，并记录
+`loop already running externally (lock port 8767 busy), skipping`；空闲时正常启动 loop，
+并把 `VL_LOCK_PORT`（默认 8767）写进子进程环境。
 
-不要同时让两边管理 loop。
+**这条守卫只对带 8767 锁的新版 loop 有效。** 升级前就在跑的旧 loop 进程没有这把锁，插件探不到它，
+两边会同时开麦——本项目实测过一次：systemd 的 `dsh-voice-loop`（10 月 31 日启动、旧代码）
+与插件 loop 并存，同一句「小艺，现在几点了」在两边都判为唤醒，命令被注入两次。
+
+- **迁到插件托管**：`systemctl --user disable --now dsh-voice-loop dsh-tts dsh-autoread dsh-voice-bridge`，
+  确认 `pgrep -af voice_loop` 无输出、`ss -ltn | grep -E ':(8765|8766|8767)'` 无监听，再重启 DSH 宿主。
+- **只想让 systemd 管 loop、插件管其余服务**：保持 systemd loop 运行即可，插件会跳过 loop。
+- **回迁 systemd**：`dsh plugin --profile <name> remove dsh-voice-assistant`，再按上面 B 方式启用四个单元。
 
 详见 [技术文档 15 章](docs/TECHNICAL.md)。
+
+## 排错
+
+**唤醒一次，命令被发两遍 / 回答出现两条** —— 有两个 loop 在听麦克风：
+
+```bash
+pgrep -af voice_loop                                     # 出现两条即为重复
+systemctl --user disable --now dsh-voice-loop.service    # 保留插件托管的那条
+```
+
+**页面里没有「停止朗读」按钮** —— 打开浏览器控制台按症状排查：
+
+- 出现 `web boot: 1 entry did not activate / dsh-voice-stop-button: failed`：
+  `client/lib/client.js` 顶部的 `inject` 必须声明 `slots` 服务（`const inject = ["slots"];`），
+  否则 `ctx.slots` 为 `undefined`，整个入口激活失败。
+- 没有报错但按钮仍不出现：确认 `client/` 包已 add 进**当前** profile，然后刷新页面；
+  控制台执行 `document.querySelectorAll('[data-voice-stop]').length`，应等于当前消息条数。
+- 直接猜 `/plugins/...` 路径会 404/401：bundle 走 `??` 组合形式并带 `rev`，
+  真实 URL 从页面资源列表里取。
+
+**注入失败（`no composer` / HTTP 502）** —— 页面正在加载或刷新中，等加载完成后重试；
+仍失败时 `systemctl --user restart dsh-voice-auth.service` 刷新 token 后再试一次。
