@@ -264,3 +264,63 @@ ast 层检查不到。教训：校验用 `python -m py_compile`，不要只做 a
   不是链路故障；`node src/cdp/send.mjs '' --no-enter` 返回 `{"ok":true,...}` 可证
 - 教训：切换托管方后必须核对 `pgrep -af voice_loop` 只有一条
 
+## 分段器换 Silero VAD（2026-11-03）
+
+### 为什么换
+- 旧能量法（底噪 + 10 dB）在**判不出静音**时只能靠 `VL_MAX_SPEECH=10` 兜底，表现为「说完还要等十秒」；
+  稳态噪声（风扇/键盘）又会把能量顶上去，出现误判与空段。能量法本身不建模语音，阈值再调也只是延迟换误判。
+- 换 `sherpa_onnx.VoiceActivityDetector` + Silero（`~/.dsh/speech-to-text/sensevoice/models/silero/silero_vad.onnx`，1.8 MB，
+  本机已有，无需下载）。能量法保留为回退路径：`VL_VAD=energy` 或模型缺失/初始化失败时自动退回（stderr 一条 warning）。
+
+### 实现要点
+- 音频仍是 16 kHz / 480 采样（30 ms）帧；喂 VAD 前把 480 帧攒成 512 采样（`window_size`）再 `accept_waveform`，
+  避免半窗丢帧（代价是平均 ~16 ms、最坏 ~30 ms 的攒窗延迟）。
+- 段结束立刻 `pop` 出样本交给原有 ASR/唤醒词逻辑（`handle_segment` 未改行为），`ready` 事件新增
+  `vad`（silero/energy）与 `vad_params`。
+- `Segmenter.push()` 改为返回 list（一次 push 可能吐出多段），新增 `flush()`，`run_live`/`run_wav` 共用
+  `make_segmenter()`；`--wav` 模式的收尾走 `flush()`（原来直接调 `_cut`）。
+
+### 实测（fixture：0.4 s 底噪 + 1.2 s 真语音 + 0.6 s 底噪，edge-tts 合成，见 tests/fixtures/vad_speech.wav）
+| 指标 | 能量法 | Silero |
+|---|---|---|
+| 切出段数 | 1 | 1 |
+| 段起点（真值 0.39 s） | 0.39 s | 0.422 s |
+| 段尾 − 实际语音结束 | +0.59 s（把 0.55 s 收尾静音全吞进段里） | **+0.102 s** |
+| 说完 → 出 segment（音频时钟） | 0.59 s | **0.39 s** |
+
+- 句尾延迟拆解：Silero 释放滞后 ~0.10 s + `min_silence` 0.25 s + 帧/攒窗量化 ~0.03 s = 0.39 s。
+  **目标 0.35 s 未完全达到（差 ~40 ms）**，但相比旧能量法的 10 s 兜底已是数量级改善。
+- 要压到 0.35 s 以内，两条实测可行的路（同 fixture，ASR 文本不变）：
+  `VL_VAD_MIN_SILENCE=0.20` → 0.33 s；`VL_VAD_THRESHOLD=0.7` → 0.33 s（两者同时 → 0.30 s）。
+  默认值仍按需求保留 0.25 / 0.5，避免为单条样本牺牲长句容错。
+
+### fixture 重新生成（需要网络）
+```bash
+.venv/bin/python - <<'PY'
+import asyncio, edge_tts, miniaudio, numpy as np, wave
+SR = 16000
+async def main():
+    c = edge_tts.Communicate("小艺，现在几点了", "zh-CN-XiaoxiaoNeural", rate="+40%")
+    buf = bytearray()
+    async for ch in c.stream():
+        if ch["type"] == "audio":
+            buf += ch["data"]
+    d = miniaudio.decode(bytes(buf), output_format=miniaudio.SampleFormat.SIGNED16,
+                         nchannels=1, sample_rate=SR)
+    a = np.frombuffer(d.samples, dtype="<i2").astype(np.float32)
+    f = 480
+    db = np.array([10 * np.log10(np.mean((a[i*f:(i+1)*f] / 32768.0) ** 2) + 1e-12)
+                   for i in range(len(a) // f)])
+    idx = np.where(db > db.max() - 30)[0]
+    sp = a[idx[0]*f:(idx[-1]+1)*f]
+    sp *= 0.25 * 32768.0 / np.max(np.abs(sp))          # 峰值约 -12 dBFS
+    rng = np.random.default_rng(7)
+    x = np.concatenate([rng.normal(0, 10.3, int(0.4*SR)), sp, rng.normal(0, 10.3, int(0.6*SR))])
+    with wave.open("tests/fixtures/vad_speech.wav", "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+        w.writeframes(np.clip(np.round(x), -32768, 32767).astype("<i2").tobytes())
+asyncio.run(main())
+PY
+```
+用例：`.venv/bin/python tests/test_vad_silero.py`（8 条：1 段、段尾 ≤0.35 s、回退路径、模型缺失 warning）。
+

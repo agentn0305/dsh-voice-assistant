@@ -311,6 +311,8 @@ voice-assistant/
 | `VL_OUTPUT_DEVICE` | 系统默认 | 扬声器名称子串或数字索引 |
 | `VL_LOCK_PORT` | `8767` | voice_loop 单实例锁端口；插件守卫使用同一端口 |
 | `VL_PORTAUDIO_LIB` | 自动探测 | `libportaudio.so.2` 绝对路径（conda / 自编译 / 无 root 解包时） |
+| `VL_VAD` | `silero` | 分段器：`silero`（Silero VAD，默认）或 `energy`（旧能量法）；模型缺失/初始化失败时打 warning 自动回退能量法 |
+| `VL_VAD_MIN_SILENCE` | `0.25` | 句尾静音判定（秒）；连同 `VL_VAD_THRESHOLD`（默认 0.5）、`VL_VAD_MODEL`（默认 SenseVoice 目录下的 `silero_vad.onnx`）见 `config/.env.example` |
 
 设备诊断：`.venv/bin/python src/audio_io.py --list`（Windows：`.venv\Scripts\python.exe src\audio_io.py --list`）
 打印设备表和实际录音/播放设备；`voice_loop.py` 的 `ready` 事件带 `input_device`（index/name/spec/channels/default_samplerate）。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""语音环路：麦克风 → 能量 VAD → SenseVoice → 唤醒词 → 动作。
+"""语音环路：麦克风 → VAD（Silero，可回退能量）→ SenseVoice → 唤醒词 → 动作。
    四段全部本地；唤醒后的"把话交给 agent"通过 VOICE_CMD_URL 插件化接入（暂未接）。
    用法：voice_loop.py            实时麦克风
         voice_loop.py --wav x.wav  离线回放自测"""
@@ -30,6 +30,16 @@ MAX_SPEECH_S = float(os.environ.get("VL_MAX_SPEECH", "10"))
 END_SILENCE_S = float(os.environ.get("VL_END_SILENCE", "0.55"))
 BARGE_MODE = os.environ.get("VL_BARGE", "off")     # off = 只认语音关键词；energy = 能量打断（无 AEC 会自激）
 LOCK_PORT = int(os.environ.get("VL_LOCK_PORT", "8767"))
+
+# ── 分段器（VAD）────────────────────────────────────────────────
+VAD_ENGINE = os.environ.get("VL_VAD", "silero").strip().lower()   # silero | energy
+VAD_MODEL = os.environ.get("VL_VAD_MODEL",
+    os.path.expanduser("~/.dsh/speech-to-text/sensevoice/models/silero/silero_vad.onnx"))
+VAD_THRESHOLD = float(os.environ.get("VL_VAD_THRESHOLD", "0.5"))
+VAD_MIN_SILENCE = float(os.environ.get("VL_VAD_MIN_SILENCE", "0.25"))   # 说完多久算一句结束
+VAD_MIN_SPEECH = float(os.environ.get("VL_VAD_MIN_SPEECH", "0.25"))
+VAD_MAX_SPEECH = float(os.environ.get("VL_VAD_MAX_SPEECH", "10"))
+VAD_WINDOW = 512                 # Silero 的 window_size（采样点，32 ms）；30 ms 帧须攒窗后喂
 
 _rec = None
 _lock = None                    # 单实例锁，进程存活期间一直持有
@@ -122,8 +132,15 @@ def emit(kind, **kw):
     print(json.dumps({"t": round(time.time(), 2), "kind": kind, **kw}, ensure_ascii=False), flush=True)
 
 
+def _rms_db(samples):
+    x = np.asarray(samples, dtype=np.float32) / 32768.0
+    return round(float(10 * np.log10(np.mean(x ** 2) + 1e-12)), 1)
+
+
 class Segmenter:
-    """能量 VAD：自适应底噪 + 起音/收尾挂起，输出语音段。"""
+    """能量 VAD（回退路径）：自适应底噪 + 起音/收尾挂起，输出语音段。"""
+    engine = "energy"
+
     def __init__(self):
         self.noise = -70.0
         self.in_speech = False
@@ -131,7 +148,19 @@ class Segmenter:
         self.silence = 0
         self.buf = []
 
+    @property
+    def params(self):
+        return {"margin": NOISE_MARGIN_DB, "minSpeech": MIN_SPEECH_S,
+                "maxSpeech": MAX_SPEECH_S, "endSilence": END_SILENCE_S}
+
     def push(self, frame, idx):
+        out = self._push(frame, idx)
+        return [out] if out else []
+
+    def flush(self):
+        return [self._cut(0, forced=True)] if self.in_speech else []
+
+    def _push(self, frame, idx):
         db = 10 * np.log10(np.mean((frame / 32768.0) ** 2) + 1e-12)
         if not self.in_speech:
             self.noise = 0.98 * self.noise + 0.02 * db if db < self.noise + 6 else self.noise
@@ -172,6 +201,94 @@ class Segmenter:
             return None
         return {"pcm": seg, "dur": round(dur, 2), "start": self.start,
                 "forced": forced, "peak": round(float(peak), 1), "tts_busy": busy}
+
+
+class SileroSegmenter:
+    """Silero VAD（sherpa-onnx）：30 ms 帧攒成 512 采样窗口后喂 VAD，段结束即 pop 出样本。"""
+    engine = "silero"
+
+    def __init__(self):
+        import sherpa_onnx
+        path = os.path.expanduser(VAD_MODEL)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"silero model not found: {path}")
+        cfg = sherpa_onnx.VadModelConfig()
+        cfg.silero_vad.model = path
+        cfg.silero_vad.threshold = VAD_THRESHOLD
+        cfg.silero_vad.min_silence_duration = VAD_MIN_SILENCE
+        cfg.silero_vad.min_speech_duration = VAD_MIN_SPEECH
+        cfg.silero_vad.max_speech_duration = VAD_MAX_SPEECH
+        cfg.silero_vad.window_size = VAD_WINDOW
+        cfg.sample_rate = SR
+        cfg.num_threads = 1
+        cfg.provider = "cpu"
+        if not cfg.validate():
+            raise RuntimeError("invalid VadModelConfig")
+        self.vad = sherpa_onnx.VoiceActivityDetector(cfg, buffer_size_in_seconds=VAD_MAX_SPEECH + 30)
+        self.pending = np.zeros(0, dtype=np.float32)     # 凑不满 512 的余量
+        self.in_speech = False
+        self.tts_at_onset = False
+        self.start = 0
+
+    @property
+    def params(self):
+        return {"model": os.path.basename(VAD_MODEL), "threshold": VAD_THRESHOLD,
+                "minSpeech": VAD_MIN_SPEECH, "maxSpeech": VAD_MAX_SPEECH,
+                "minSilence": VAD_MIN_SILENCE, "window": VAD_WINDOW}
+
+    def push(self, frame, idx):
+        if not self.in_speech and self.vad.is_speech_detected():
+            self._onset()
+        self.pending = np.concatenate([self.pending, frame.astype(np.float32) / 32768.0])
+        while len(self.pending) >= VAD_WINDOW:
+            self.vad.accept_waveform(self.pending[:VAD_WINDOW])
+            self.pending = self.pending[VAD_WINDOW:]
+            if not self.in_speech and self.vad.is_speech_detected():
+                self._onset()
+        return self._drain()
+
+    def flush(self):
+        if len(self.pending):
+            self.vad.accept_waveform(np.pad(self.pending, (0, VAD_WINDOW - len(self.pending))))
+            self.pending = np.zeros(0, dtype=np.float32)
+        self.vad.flush()
+        out = self._drain()
+        self.in_speech = False
+        return out
+
+    def _onset(self):
+        self.in_speech = True
+        self.tts_at_onset = tts_busy()
+
+    def _drain(self):
+        out = []
+        while not self.vad.empty():
+            seg = self.vad.front
+            pcm = (np.asarray(seg.samples, dtype=np.float32) * 32768.0).astype(np.int16)
+            start = float(seg.start) / SR
+            self.vad.pop()
+            dur = len(pcm) / SR
+            if dur < MIN_SPEECH_S:                # 与能量法同一条最小时长门槛
+                continue
+            if not self.vad.is_speech_detected():
+                self.in_speech = False
+            out.append({"pcm": pcm, "dur": round(dur, 2), "start": round(start, 3),
+                        "forced": dur >= VAD_MAX_SPEECH - 0.05,
+                        "peak": _rms_db(pcm), "tts_busy": getattr(self, "tts_at_onset", False)})
+            self.tts_at_onset = False
+        return out
+
+
+def make_segmenter():
+    """默认 Silero；模型缺失或初始化失败 → 一条 warning + 自动回退能量法。"""
+    if VAD_ENGINE == "energy":
+        return Segmenter()
+    try:
+        return SileroSegmenter()
+    except Exception as exc:
+        print(f"warning: silero VAD unavailable ({exc!r}); falling back to energy VAD",
+              file=sys.stderr, flush=True)
+        return Segmenter()
 
 
 FILLER = {"", "嗯", "哦", "啊", "呃", "嗯嗯", "哦哦", "唉", "诶"}
@@ -230,16 +347,16 @@ def run_live():
     except Exception as exc:
         dev = {"error": repr(exc)}
     rec = recognizer()
-    emit("ready", wake=WAKE_WORDS, model=os.path.basename(MODEL), input_device=dev)
-    seg = Segmenter()
+    seg = make_segmenter()
+    emit("ready", wake=WAKE_WORDS, model=os.path.basename(MODEL), input_device=dev,
+         vad=seg.engine, vad_params=seg.params)
     idx = 0
     while True:
         try:
             for frame in audio_io.record_stream(SR, 1, FRAME):
-                out = seg.push(frame, idx)
-                idx += 1
-                if out:
+                for out in seg.push(frame, idx):
                     handle_segment(rec, out)
+                idx += 1
             emit("capture_eof")
         except Exception as exc:            # 设备被拔/占用：报出来，1 秒后重连
             emit("capture_error", err=repr(exc))
@@ -251,14 +368,13 @@ def run_wav(path):
     rec = recognizer()
     with wave.open(path) as w:
         data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
-    emit("ready", mode="wav", file=path, dur=round(len(data) / SR, 2))
-    seg = Segmenter()
+    seg = make_segmenter()
+    emit("ready", mode="wav", file=path, dur=round(len(data) / SR, 2),
+         vad=seg.engine, vad_params=seg.params)
     for i in range(0, len(data) - FRAME, FRAME):
-        out = seg.push(data[i:i + FRAME], i // FRAME)
-        if out:
+        for out in seg.push(data[i:i + FRAME], i // FRAME):
             handle_segment(rec, out)
-    out = seg._cut(0, forced=True) if seg.in_speech else None
-    if out:
+    for out in seg.flush():
         handle_segment(rec, out)
 
 
